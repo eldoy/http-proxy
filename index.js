@@ -31,10 +31,6 @@ module.exports = function createProxy(options) {
   var transport = options.tls ? https : http
   var tls = options.tls || {}
 
-  if (target.protocol !== 'http:') {
-    throw new Error('Target must use http:')
-  }
-
   function requestOptions(req, upgrade) {
     var outgoing = headers(req.headers)
 
