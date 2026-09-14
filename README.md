@@ -18,6 +18,22 @@ server.listen(8080, '127.0.0.1')
 `proxy({ target })` returns a standard Node.js HTTP server. Supply an HTTP
 origin as the target, without a path, query, or credentials.
 
+Use an optional `before` hook to start your dev app before forwarding:
+
+```js
+var server = proxy({
+  target: 'http://127.0.0.1:3000',
+  before: async function (req, res) {
+    await ensureAppReady()
+  }
+})
+```
+
+Provide `ensureAppReady()` in your calling code. It should resolve when the
+app is listening and return immediately if it is already running. The hook
+runs for each HTTP request and WebSocket upgrade; its second argument is the
+response for HTTP, or the socket for upgrades. Hook errors return `502`.
+
 Requests retain their method, path, query, host, and forwarded headers.
 Request and response bodies stream through the proxy. Responses retain their
 status, cookies, and redirects. Connection-specific headers are filtered.

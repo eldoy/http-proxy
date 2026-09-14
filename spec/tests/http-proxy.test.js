@@ -22,9 +22,9 @@ async function listen(t, server) {
   return server.address().port
 }
 
-async function setup(t, app) {
+async function setup(t, app, before) {
   var port = await listen(t, app)
-  return listen(t, createProxy({ target: 'http://127.0.0.1:' + port }))
+  return listen(t, createProxy({ target: 'http://127.0.0.1:' + port, before }))
 }
 
 function request(port, options, body) {
@@ -92,6 +92,27 @@ test('returns 502 when the app is unavailable', async function (t) {
   assert.equal(result.status, 502)
 })
 
+test('awaits startup before forwarding and handles hook errors', async function (t) {
+  var app = http.createServer(function (req, res) { req.pipe(res) })
+  var appPort = await listen(t, app)
+  await new Promise(function (resolve) { app.close(resolve) })
+  var options = {
+    target: 'http://127.0.0.1:' + appPort,
+    before: async function () {
+      await new Promise(function (resolve) { setImmediate(resolve) })
+      await new Promise(function (resolve) {
+        app.listen(appPort, '127.0.0.1', resolve)
+      })
+    }
+  }
+  var port = await listen(t, createProxy(options))
+  var result = await request(port, { method: 'POST' }, 'pending body')
+  assert.equal(result.status, 200)
+  assert.equal(result.body.toString(), 'pending body')
+  options.before = async function () { throw new Error('Startup failed') }
+  assert.equal((await request(port)).status, 502)
+})
+
 test('forwards rejected WebSocket handshakes and bodies', async function (t) {
   var port = await setup(t, http.createServer(function (req, res) {
     res.writeHead(403, { 'content-type': 'text/plain' })
@@ -113,11 +134,13 @@ test('forwards rejected WebSocket handshakes and bodies', async function (t) {
 
 test('tunnels WebSocket frames including upgrade head bytes and cleans up', { timeout: 3000 }, async function (t) {
   var app = http.createServer()
+  var ready = false
   var closed
   var ended = new Promise(function (resolve) { closed = resolve })
   var frame = Buffer.from([0x81, 0x82, 1, 2, 3, 4, 105, 107])
   var reply = Buffer.from([0x81, 2, 104, 105])
   app.on('upgrade', function (req, socket, head) {
+    assert.equal(ready, true)
     assert.equal(req.url, '/socket?test=1')
     var accept = crypto.createHash('sha1')
       .update(req.headers['sec-websocket-key'] +
@@ -141,7 +164,10 @@ test('tunnels WebSocket frames including upgrade head bytes and cleans up', { ti
     socket.on('data', consume)
     consume(Buffer.alloc(0))
   })
-  var port = await setup(t, app)
+  var port = await setup(t, app, async function () {
+    await new Promise(function (resolve) { setImmediate(resolve) })
+    ready = true
+  })
   var client = net.connect(port, '127.0.0.1')
   t.after(function () { client.destroy() })
   await once(client, 'connect')
