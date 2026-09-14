@@ -102,6 +102,59 @@ and response bodies stream. For idle WebSocket connections, use app-level
 ping frames or set `proxy_read_timeout` to the desired idle timeout.
 See [nginx WebSocket proxying](https://nginx.org/en/docs/http/websocket.html).
 
+## Local development certificates
+
+[mkcert](https://github.com/FiloSottile/mkcert) creates a local certificate
+authority (CA), installs it in your trust store, and signs development
+certificates. It is a separate setup tool, not a dependency of this module.
+
+On macOS with Homebrew:
+
+```sh
+brew install mkcert
+mkcert -install
+```
+
+For Firefox, also install `nss` with Homebrew before running `mkcert -install`.
+The trust installation may ask for your administrator password.
+
+Create a certificate and key outside the repository:
+
+```sh
+mkdir -p ~/.config/http-proxy
+mkcert -cert-file ~/.config/http-proxy/cert.pem \
+  -key-file ~/.config/http-proxy/key.pem \
+  localhost 127.0.0.1 ::1
+```
+
+These files cover `localhost` and the loopback IP addresses. Include any
+custom development hostname in the command too, and configure it to resolve
+to your machine. Keep the private keys local; never commit or share the CA's
+`rootCA-key.pem`.
+
+Pass the certificate and key through `tls` to serve HTTPS directly:
+
+```js
+var fs = require('node:fs')
+var os = require('node:os')
+var proxy = require('./index')
+var directory = os.homedir() + '/.config/http-proxy'
+
+var server = proxy({
+  target: 'http://127.0.0.1:3000',
+  tls: {
+    key: fs.readFileSync(directory + '/key.pem'),
+    cert: fs.readFileSync(directory + '/cert.pem')
+  }
+})
+
+server.listen(8443, '127.0.0.1')
+```
+
+Open `https://localhost:8443`. WebSockets use `wss://localhost:8443` with
+the app's WebSocket path. The upstream app continues using plain HTTP.
+Omit `tls` to listen on HTTP. The optional `before` hook works in either mode.
+
 ## Tests
 
 ```sh

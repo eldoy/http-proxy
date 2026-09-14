@@ -1,10 +1,31 @@
 var test = require('node:test')
 var assert = require('node:assert/strict')
 var http = require('node:http')
-var net = require('node:net')
+var https = require('node:https')
+var tls = require('node:tls')
 var crypto = require('node:crypto')
 var once = require('node:events').once
 var createProxy = require('../../index')
+
+// Disposable localhost certificate and key used only by these tests.
+var credentials = {
+  key: `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVMobQh6ZZMS0Bohs
+2WweBQYmPkUTVqmgM9imI5LpSnehRANCAASFdMav+XM3KUnszjNB6bwa+Mti0U0K
+u3yXSKjxFT4hSn1qFkOhAJ0Y6vYkMIbNrVbZBt8Xc1bl6VZRtGLJw96G
+-----END PRIVATE KEY-----`,
+  cert: `-----BEGIN CERTIFICATE-----
+MIIBmDCCAT+gAwIBAgIUXIMeqHnl+CMGbZA03mhg8lt9qYowCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDkxNDA0MjA0MVoXDTM2MDkxMTA0
+MjA0MVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEhXTGr/lzNylJ7M4zQem8GvjLYtFNCrt8l0io8RU+IUp9ahZDoQCdGOr2
+JDCGza1W2QbfF3NW5elWUbRiycPehqNvMG0wHQYDVR0OBBYEFPMgMfraYjaZJDZ3
+/sRELryaVjv8MB8GA1UdIwQYMBaAFPMgMfraYjaZJDZ3/sRELryaVjv8MA8GA1Ud
+EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49
+BAMCA0cAMEQCIGx+LLvH7u/zFvg9soXi2buLbiyEIOZjB53+W+Nf78vMAiAUHAMT
+9CWMxP2GLOyoOZIRpMGY8Dy43tU3c/XOA1n6rw==
+-----END CERTIFICATE-----`
+}
 
 async function listen(t, server) {
   var sockets = new Set()
@@ -22,14 +43,21 @@ async function listen(t, server) {
   return server.address().port
 }
 
-async function setup(t, app, before) {
+async function setup(t, app, before, secure) {
   var port = await listen(t, app)
-  return listen(t, createProxy({ target: 'http://127.0.0.1:' + port, before }))
+  return listen(t, createProxy({
+    target: 'http://127.0.0.1:' + port,
+    before,
+    tls: secure ? credentials : undefined
+  }))
 }
 
+
 function request(port, options, body) {
+  var transport = options && options.ca ? https : http
+
   return new Promise(function (resolve, reject) {
-    var req = http.request(Object.assign({ hostname: '127.0.0.1', port },
+    var req = transport.request(Object.assign({ hostname: '127.0.0.1', port },
       options), function (res) {
       var chunks = []
       res.on('data', function (chunk) { chunks.push(chunk) })
@@ -44,7 +72,7 @@ function request(port, options, body) {
   })
 }
 
-test('forwards HTTP bodies, paths, headers, cookies and redirects', async function (t) {
+test('forwards HTTPS bodies, paths, headers, cookies and redirects', async function (t) {
   var payload = Buffer.from([0, 1, 127, 128, 255])
   var port = await setup(t, http.createServer(function (req, res) {
     assert.equal(req.method, 'POST')
@@ -65,8 +93,10 @@ test('forwards HTTP bodies, paths, headers, cookies and redirects', async functi
       })
       res.end(payload)
     })
-  }))
+  }), undefined, true)
   var result = await request(port, {
+    ca: credentials.cert,
+    servername: 'localhost',
     method: 'POST', path: '/a//b%2Fc?x=1&x=2',
     headers: {
       host: 'dev.example', 'x-forwarded-proto': 'https',
@@ -132,7 +162,7 @@ test('forwards rejected WebSocket handshakes and bodies', async function (t) {
   assert.equal(body, 'access denied')
 })
 
-test('tunnels WebSocket frames including upgrade head bytes and cleans up', { timeout: 3000 }, async function (t) {
+test('tunnels secure WebSockets, awaits readiness and cleans up', { timeout: 3000 }, async function (t) {
   var app = http.createServer()
   var ready = false
   var closed
@@ -167,10 +197,11 @@ test('tunnels WebSocket frames including upgrade head bytes and cleans up', { ti
   var port = await setup(t, app, async function () {
     await new Promise(function (resolve) { setImmediate(resolve) })
     ready = true
-  })
-  var client = net.connect(port, '127.0.0.1')
+  }, true)
+  var client = tls.connect({ host: '127.0.0.1', port, ca: credentials.cert })
   t.after(function () { client.destroy() })
-  await once(client, 'connect')
+  await once(client, 'secureConnect')
+  assert.equal(client.authorized, true)
   client.write(Buffer.concat([Buffer.from(
     'GET /socket?test=1 HTTP/1.1\r\nHost: dev.example\r\n' +
     'Connection: Upgrade\r\nUpgrade: websocket\r\n' +

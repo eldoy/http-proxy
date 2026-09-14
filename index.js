@@ -1,4 +1,5 @@
 var http = require('node:http')
+var https = require('node:https')
 
 function headers(incoming) {
   var outgoing = Object.assign({}, incoming)
@@ -27,6 +28,8 @@ function headers(incoming) {
 
 module.exports = function createProxy(options) {
   var target = new URL(options.target)
+  var transport = options.tls ? https : http
+  var tls = options.tls || {}
 
   if (target.protocol !== 'http:') {
     throw new Error('Target must use http:')
@@ -49,7 +52,7 @@ module.exports = function createProxy(options) {
     }
   }
 
-  var server = http.createServer(async function (req, res) {
+  var server = transport.createServer(tls, async function (req, res) {
     var upstream
     var response
 
