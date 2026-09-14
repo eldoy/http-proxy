@@ -55,6 +55,7 @@ module.exports = function createProxy(options) {
   var server = transport.createServer(tls, async function (req, res) {
     var upstream
     var response
+    var timedOut = false
 
     function fail() {
       if (upstream) {
@@ -65,7 +66,7 @@ module.exports = function createProxy(options) {
         response.destroy()
       }
 
-      if (res.destroyed) {
+      if (res.destroyed || res.writableEnded) {
         return
       }
 
@@ -73,8 +74,8 @@ module.exports = function createProxy(options) {
         return res.destroy()
       }
 
-      res.writeHead(502, { 'content-type': 'text/plain' })
-      res.end('Bad Gateway\n')
+      res.writeHead(timedOut ? 504 : 502, { 'content-type': 'text/plain' })
+      res.end(timedOut ? 'Gateway Timeout\n' : 'Bad Gateway\n')
     }
 
     req.on('error', fail)
@@ -94,15 +95,23 @@ module.exports = function createProxy(options) {
       if (options.before) {
         await options.before(req, res)
       }
+
+      if (res.destroyed || res.writableEnded) {
+        return
+      }
+
+      upstream = http.request(requestOptions(req))
+
+      if (options.timeout) {
+        upstream.setTimeout(options.timeout, function () {
+          timedOut = true
+          fail()
+        })
+      }
     } catch (err) {
       return fail()
     }
 
-    if (res.destroyed || res.writableEnded) {
-      return
-    }
-
-    upstream = http.request(requestOptions(req))
     upstream.on('error', fail)
 
     upstream.on('response', function (incoming) {
@@ -130,6 +139,7 @@ module.exports = function createProxy(options) {
     var remote
     var response
     var started = false
+    var timedOut = false
 
     function cleanup() {
       if (upstream) {
@@ -148,14 +158,20 @@ module.exports = function createProxy(options) {
     function fail() {
       cleanup()
 
+      if (socket.destroyed || socket.writableEnded) {
+        return
+      }
+
       if (started) {
         return socket.destroy()
       }
 
       started = true
 
+      var status = timedOut ? '504 Gateway Timeout' : '502 Bad Gateway'
+
       socket.end(
-        'HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n' +
+        'HTTP/1.1 ' + status + '\r\nConnection: close\r\n' +
           'Content-Length: 0\r\n\r\n'
       )
     }
@@ -169,15 +185,23 @@ module.exports = function createProxy(options) {
       if (options.before) {
         await options.before(req, socket)
       }
+
+      if (socket.destroyed || socket.writableEnded) {
+        return
+      }
+
+      upstream = http.request(requestOptions(req, true))
+
+      if (options.timeout) {
+        upstream.setTimeout(options.timeout, function () {
+          timedOut = true
+          fail()
+        })
+      }
     } catch (err) {
       return fail()
     }
 
-    if (socket.destroyed || socket.writableEnded) {
-      return
-    }
-
-    upstream = http.request(requestOptions(req, true))
     upstream.on('error', fail)
 
     upstream.on('response', function (incoming) {
@@ -201,6 +225,7 @@ module.exports = function createProxy(options) {
 
     upstream.on('upgrade', function (incoming, upstreamSocket, upstreamHead) {
       remote = upstreamSocket
+      remote.setTimeout(0)
       remote.on('error', fail)
       remote.on('close', function () {
         socket.destroy()

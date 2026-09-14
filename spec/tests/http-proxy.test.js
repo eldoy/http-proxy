@@ -43,11 +43,12 @@ async function listen(t, server) {
   return server.address().port
 }
 
-async function setup(t, app, before, secure) {
+async function setup(t, app, before, secure, timeout) {
   var port = await listen(t, app)
   return listen(t, createProxy({
     target: 'http://127.0.0.1:' + port,
     before,
+    timeout,
     tls: secure ? credentials : undefined
   }))
 }
@@ -141,6 +142,33 @@ test('awaits startup before forwarding and handles hook errors', async function 
   assert.equal(result.body.toString(), 'pending body')
   options.before = async function () { throw new Error('Startup failed') }
   assert.equal((await request(port)).status, 502)
+
+  options.before = function (req) {
+    req.headers['x-invalid'] = '\n'
+  }
+  assert.equal((await request(port)).status, 502)
+})
+
+test('times out stalled HTTP responses and WebSocket handshakes', {
+  timeout: 3000
+}, async function (t) {
+  var app = http.createServer(function (req, res) {
+    req.resume()
+
+    if (req.url === '/partial') {
+      res.write('partial')
+    }
+  })
+  app.on('upgrade', function () {})
+  var port = await setup(t, app, undefined, false, 50)
+
+  assert.equal((await request(port)).status, 504)
+  assert.equal((await request(port, { headers: {
+    connection: 'Upgrade', upgrade: 'websocket'
+  } })).status, 504)
+  await assert.rejects(request(port, { path: '/partial' }), {
+    code: 'ECONNRESET'
+  })
 })
 
 test('forwards rejected WebSocket handshakes and bodies', async function (t) {
@@ -197,7 +225,7 @@ test('tunnels secure WebSockets, awaits readiness and cleans up', { timeout: 300
   var port = await setup(t, app, async function () {
     await new Promise(function (resolve) { setImmediate(resolve) })
     ready = true
-  }, true)
+  }, true, 50)
   var client = tls.connect({ host: '127.0.0.1', port, ca: credentials.cert })
   t.after(function () { client.destroy() })
   await once(client, 'secureConnect')
@@ -220,7 +248,7 @@ test('tunnels secure WebSockets, awaits readiness and cleans up', { timeout: 300
       var body = data.subarray(boundary + 4)
       if (body.length >= reply.length * 2 && !sent) {
         sent = true
-        client.write(frame)
+        setTimeout(function () { client.write(frame) }, 100)
       }
       if (body.length === reply.length * 3) {
         assert.deepEqual(body, Buffer.concat([reply, reply, reply]))

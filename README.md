@@ -42,6 +42,21 @@ WebSocket upgrades and traffic pass through automatically.
 An unavailable app returns `502 Bad Gateway`. If a response has already
 started, an upstream failure closes the connection.
 
+Set `timeout` in milliseconds to close an inactive upstream connection:
+
+```js
+var server = proxy({
+  target: 'http://127.0.0.1:3000',
+  timeout: 30000
+})
+```
+
+This measures socket inactivity after connecting, not total request duration.
+It returns `504 Gateway Timeout` if response headers have not been sent;
+otherwise it closes the response. It also covers waiting for a WebSocket
+upgrade, but not an established WebSocket or the `before` hook. Omitting
+`timeout` (or setting it to `0`) adds no timeout.
+
 ## Behind a reverse proxy
 
 This module runs independently. Optionally place a server such as Caddy or
