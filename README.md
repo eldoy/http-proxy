@@ -39,7 +39,8 @@ Request and response bodies stream through the proxy. Responses retain their
 status, cookies, and redirects. Connection-specific headers are filtered.
 WebSocket upgrades and traffic pass through automatically.
 
-An unavailable app returns `502 Bad Gateway`. If a response has already
+An unavailable app returns status `502` with the actual error message as one
+line of plain text. If a response has already
 started, an upstream failure closes the connection.
 
 Set `timeout` in milliseconds to close an inactive upstream connection:
@@ -167,7 +168,9 @@ server.listen(8443, '127.0.0.1')
 ```
 
 Open `https://localhost:8443`. WebSockets use `wss://localhost:8443` with
-the app's WebSocket path. The upstream app continues using plain HTTP.
+the app's WebSocket path. HTTPS supports HTTP/2 with HTTP/1.1 fallback;
+WebSockets use HTTP/1.1 upgrades. The upstream app continues using plain
+HTTP/1.1. HTTP/2 authority headers are forwarded as the app's `Host` header.
 Omit `tls` to listen on HTTP. The optional `before` hook works in either mode.
 
 ## Tests

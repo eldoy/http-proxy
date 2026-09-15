@@ -2,6 +2,7 @@ var test = require('node:test')
 var assert = require('node:assert/strict')
 var http = require('node:http')
 var https = require('node:https')
+var http2 = require('node:http2')
 var tls = require('node:tls')
 var crypto = require('node:crypto')
 var once = require('node:events').once
@@ -112,6 +113,73 @@ test('forwards HTTPS bodies, paths, headers, cookies and redirects', async funct
   assert.deepEqual(result.body, payload)
 })
 
+test('forwards concurrent HTTP/2 streams to HTTP/1.1', {
+  timeout: 3000
+}, async function (t) {
+  var payload = Buffer.from([0, 1, 127, 128, 255])
+  var responses = []
+  var port = await setup(t, http.createServer(function (req, res) {
+    assert.equal(req.httpVersion, '1.1')
+    assert.equal(req.method, 'POST')
+    assert.equal(req.url, '/a//b%2Fc?x=1&x=2')
+    assert.equal(req.headers.host, 'dev.example')
+    assert.equal(req.headers['x-forwarded-proto'], 'https')
+    var chunks = []
+    req.on('data', function (chunk) { chunks.push(chunk) })
+    req.on('end', function () {
+      assert.deepEqual(Buffer.concat(chunks), payload)
+      responses.push(res)
+      if (responses.length !== 2) return
+      responses.forEach(function (response) {
+        response.writeHead(307, {
+          location: '/next',
+          'set-cookie': ['a=1', 'b=2'],
+          connection: 'close, x-private',
+          'x-private': 'remove'
+        })
+        response.write(payload.subarray(0, 2))
+        response.end(payload.subarray(2))
+      })
+    })
+  }), function (req) {
+    assert.equal(req.headers.host, 'dev.example')
+    req.headers['x-forwarded-proto'] = 'https'
+  }, true)
+  var client = http2.connect('https://127.0.0.1:' + port, {
+    ca: credentials.cert,
+    servername: 'localhost'
+  })
+  t.after(function () { client.destroy() })
+  await once(client, 'connect')
+  assert.equal(client.alpnProtocol, 'h2')
+
+  await Promise.all([0, 1].map(function () {
+    return new Promise(function (resolve, reject) {
+      var stream = client.request({
+        ':method': 'POST',
+        ':path': '/a//b%2Fc?x=1&x=2',
+        ':authority': 'dev.example'
+      })
+      var chunks = []
+      stream.on('error', reject)
+      stream.on('response', function (headers) {
+        assert.equal(headers[':status'], 307)
+        assert.equal(headers.location, '/next')
+        assert.deepEqual(headers['set-cookie'], ['a=1', 'b=2'])
+        assert.equal(headers.connection, undefined)
+        assert.equal(headers['transfer-encoding'], undefined)
+        assert.equal(headers['x-private'], undefined)
+      })
+      stream.on('data', function (chunk) { chunks.push(chunk) })
+      stream.on('end', function () {
+        assert.deepEqual(Buffer.concat(chunks), payload)
+        resolve()
+      })
+      stream.end(payload)
+    })
+  }))
+})
+
 test('returns 502 when the app is unavailable', async function (t) {
   var app = http.createServer()
   app.listen(0, '127.0.0.1')
@@ -121,6 +189,8 @@ test('returns 502 when the app is unavailable', async function (t) {
   var port = await listen(t, createProxy({ target }))
   var result = await request(port)
   assert.equal(result.status, 502)
+  assert.match(result.headers['content-type'], /^text\/plain/)
+  assert.match(result.body.toString(), /ECONNREFUSED/)
 })
 
 test('awaits startup before forwarding and handles hook errors', async function (t) {
@@ -140,8 +210,10 @@ test('awaits startup before forwarding and handles hook errors', async function 
   var result = await request(port, { method: 'POST' }, 'pending body')
   assert.equal(result.status, 200)
   assert.equal(result.body.toString(), 'pending body')
-  options.before = async function () { throw new Error('Startup failed') }
-  assert.equal((await request(port)).status, 502)
+  options.before = async function () { throw new Error('Startup failed\nDetails') }
+  var failed = await request(port)
+  assert.equal(failed.status, 502)
+  assert.equal(failed.body.toString(), 'Startup failed Details\n')
 
   options.before = function (req) {
     req.headers['x-invalid'] = '\n'

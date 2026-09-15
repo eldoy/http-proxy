@@ -1,5 +1,5 @@
 var http = require('node:http')
-var https = require('node:https')
+var http2 = require('node:http2')
 
 function headers(incoming) {
   var outgoing = Object.assign({}, incoming)
@@ -23,13 +23,17 @@ function headers(incoming) {
     delete outgoing[name]
   })
 
+  Object.keys(outgoing).forEach(function (name) {
+    if (name.startsWith(':')) delete outgoing[name]
+  })
+
   return outgoing
 }
 
 module.exports = function createProxy(options) {
   var target = new URL(options.target)
-  var transport = options.tls ? https : http
-  var tls = options.tls || {}
+  var createServer = options.tls ? http2.createSecureServer : http.createServer
+  var tls = Object.assign({ allowHTTP1: true }, options.tls)
 
   function requestOptions(req, upgrade) {
     var outgoing = headers(req.headers)
@@ -48,12 +52,12 @@ module.exports = function createProxy(options) {
     }
   }
 
-  var server = transport.createServer(tls, async function (req, res) {
+  var server = createServer(tls, async function (req, res) {
     var upstream
     var response
     var timedOut = false
 
-    function fail() {
+    function fail(err) {
       if (upstream) {
         upstream.destroy()
       }
@@ -70,8 +74,10 @@ module.exports = function createProxy(options) {
         return res.destroy()
       }
 
-      res.writeHead(timedOut ? 504 : 502, { 'content-type': 'text/plain' })
-      res.end(timedOut ? 'Gateway Timeout\n' : 'Bad Gateway\n')
+      res.writeHead(timedOut ? 504 : 502, {
+        'content-type': 'text/plain; charset=utf-8'
+      })
+      res.end(String(err.message).replace(/[\r\n]+/g, ' ') + '\n')
     }
 
     req.on('error', fail)
@@ -88,6 +94,10 @@ module.exports = function createProxy(options) {
     })
 
     try {
+      if (req.httpVersionMajor === 2) {
+        req.headers.host = req.headers[':authority']
+      }
+
       if (options.before) {
         await options.before(req, res)
       }
@@ -101,11 +111,11 @@ module.exports = function createProxy(options) {
       if (options.timeout) {
         upstream.setTimeout(options.timeout, function () {
           timedOut = true
-          fail()
+          fail(new Error('Upstream timed out: ' + options.target))
         })
       }
     } catch (err) {
-      return fail()
+      return fail(err)
     }
 
     upstream.on('error', fail)
@@ -114,11 +124,12 @@ module.exports = function createProxy(options) {
       response = incoming
       incoming.on('error', fail)
 
-      res.writeHead(
-        incoming.statusCode,
-        incoming.statusMessage,
-        headers(incoming.headers)
-      )
+      var outgoing = headers(incoming.headers)
+      if (req.httpVersionMajor === 2) {
+        res.writeHead(incoming.statusCode, outgoing)
+      } else {
+        res.writeHead(incoming.statusCode, incoming.statusMessage, outgoing)
+      }
 
       incoming.pipe(res)
     })
@@ -151,7 +162,7 @@ module.exports = function createProxy(options) {
       }
     }
 
-    function fail() {
+    function fail(err) {
       cleanup()
 
       if (socket.destroyed || socket.writableEnded) {
@@ -165,10 +176,12 @@ module.exports = function createProxy(options) {
       started = true
 
       var status = timedOut ? '504 Gateway Timeout' : '502 Bad Gateway'
+      var body = String(err.message).replace(/[\r\n]+/g, ' ') + '\n'
 
       socket.end(
         'HTTP/1.1 ' + status + '\r\nConnection: close\r\n' +
-          'Content-Length: 0\r\n\r\n'
+          'Content-Type: text/plain; charset=utf-8\r\n' +
+          'Content-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body
       )
     }
 
@@ -191,11 +204,11 @@ module.exports = function createProxy(options) {
       if (options.timeout) {
         upstream.setTimeout(options.timeout, function () {
           timedOut = true
-          fail()
+          fail(new Error('Upstream timed out: ' + options.target))
         })
       }
     } catch (err) {
-      return fail()
+      return fail(err)
     }
 
     upstream.on('error', fail)
@@ -232,7 +245,7 @@ module.exports = function createProxy(options) {
       }
 
       if ((incoming.headers.upgrade || '').toLowerCase() !== 'websocket') {
-        return fail()
+        return fail(new Error('Invalid upstream WebSocket upgrade'))
       }
 
       started = true
